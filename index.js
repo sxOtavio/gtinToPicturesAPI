@@ -2,7 +2,7 @@ require("dotenv").config();
 
 const express = require("express");
 const app = express();
-
+const fs = require("fs");
 const { Pool } = require("pg");
 const cors = require("cors");
 const bcrypt = require("bcrypt");
@@ -31,19 +31,22 @@ console.log("Banco configurado");
 
 // ================= MULTER =================
 
+
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     cb(null, "./images");
   },
 
   filename: (req, file, cb) => {
-    const gtin = req.body.gtin;
+    const extension = path.extname(file.originalname);
 
-    cb(null, `${gtin}.jpg`);
+    // nome temporário
+    cb(null, `${Date.now()}${extension}`);
   },
 });
 
 const upload = multer({ storage });
+
 
 // ================= AUTH =================
 
@@ -110,8 +113,11 @@ app.post("/login", async (req, res) => {
         username: bankUser.username,
       },
       JWT_SECRET,
-      {
-        expiresIn: "5h",
+
+      //Lembrar que expira 24h então na proxima vez olhar
+
+{
+        expiresIn: "23h",
       },
     );
 
@@ -186,12 +192,12 @@ app.post("/register", async (req, res) => {
 
 app.get("/api/catalog", authenticateToken, async (req, res) => {
   try {
-    const result = await pool.query("SELECT gtin FROM product_images");
+    const result = await pool.query("SELECT gtin, extension FROM product_images");
 
     const images = {};
 
     result.rows.forEach((row) => {
-      images[row.gtin] = `${BASE_URL}/images/${row.gtin}.jpg`;
+      images[row.gtin] = `${BASE_URL}/images/${row.gtin}.${row.extension}`;
     });
 
     res.set("Cache-Control", "public, max-age=3600");
@@ -214,7 +220,11 @@ app.post(
   upload.single("image"),
   async (req, res) => {
     try {
+      const image = req.file;
       const { gtin } = req.body;
+
+      console.log("SERVIÇO NODE !! Recebendo requisição de upload...");
+      console.log("GTIN:", gtin);
 
       if (!gtin) {
         return res.status(400).json({
@@ -222,37 +232,73 @@ app.post(
         });
       }
 
+      if (!image) {
+        return res.status(400).json({
+          error: "Imagem obrigatória",
+        });
+      }
+
+      const extension = path
+        .extname(image.originalname)
+        .replace(".", "")
+        .toLowerCase();
+
+      const oldPath = image.path;
+
+      const newPath = path.join(
+        __dirname,
+        "images",
+        `${gtin}.${extension}`
+      );
+
+      // Se já existir uma imagem para esse GTIN, substitui
+      if (fs.existsSync(newPath)) {
+        fs.unlinkSync(newPath);
+      }
+
+      // Renomeia o arquivo temporário para GTIN.extensão
+      fs.renameSync(oldPath, newPath);
+
       await pool.query(
         `
         INSERT INTO product_images
-        (gtin, created_at
+        (
+          gtin,
+          extension,
+          created_at
         )
         VALUES
         (
           $1,
+          $2,
           NOW()
         )
         ON CONFLICT (gtin)
-        DO NOTHING
+        DO UPDATE
+        SET
+          extension = EXCLUDED.extension
         `,
-        [gtin],
+        [gtin, extension]
       );
+
+      const imageUrl = `${BASE_URL}/images/${gtin}.${extension}`;
+
+      console.log("Imagem salva:", imageUrl);
 
       res.json({
         success: true,
         gtin,
-        image_url: `${BASE_URL}/images/${gtin}.jpg`,
+        image_url: imageUrl,
       });
     } catch (error) {
-      console.error(error);
+      console.error("Erro upload:", error);
 
       res.status(500).json({
         error: "Erro ao enviar imagem",
       });
     }
-  },
+  }
 );
-
 // ================= SERVIDOR =================
 
 const PORT = process.env.PORT || 4000;
